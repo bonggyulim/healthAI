@@ -1,0 +1,7 @@
+{
+  "name": "Remix: MediAI - 스마트 건강 진단",
+  "description": "AI 기반 증상 분석 및 맞춤형 건강 가이드 서비스",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
