@@ -36,6 +36,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import ReactMarkdown from 'react-markdown';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import NaverMap from './components/NaverMap';
 
 // Types
 import { SymptomData, UserDetail, HealthHistory, DiagnosisResult, DiagnosisHistoryItem } from './types';
@@ -80,6 +81,7 @@ export default function App() {
   const [mediaFiles, setMediaFiles] = useState<{ type: 'image' | 'video' | 'audio', data: string, name: string, mimeType: string }[]>([]);
   const [diagnosisHistory, setDiagnosisHistory] = useState<DiagnosisHistoryItem[]>([]);
   const [activeTab, setActiveTab] = useState<'home' | 'history' | 'profile'>('home');
+  const [showMap, setShowMap] = useState(false);
   const [sessionVersion, setSessionVersion] = useState(0);
   const [isProfileSaved, setIsProfileSaved] = useState(false);
   const [toast, setToast] = useState<{ message: string; show: boolean }>({ message: '', show: false });
@@ -137,6 +139,17 @@ export default function App() {
   };
 
   const handleDiagnosis = async () => {
+    // 1. 캐싱 확인: 동일한 증상 입력에 대한 결과가 있는지 확인
+    const cacheKey = `diagnosis_cache_${JSON.stringify(symptoms)}`;
+    const cachedResult = localStorage.getItem(cacheKey);
+    
+    if (cachedResult) {
+      console.log("Using cached diagnosis result.");
+      setResult(JSON.parse(cachedResult));
+      nextStep();
+      return;
+    }
+
     setLoading(true);
     console.log("Starting diagnosis...");
     try {
@@ -164,11 +177,11 @@ export default function App() {
         - 현재 복용 약: ${history.currentMeds.join(', ')}
 
         [출력 형식]
-        반드시 JSON 형식으로만 응답해주세요.
+        반드시 JSON 형식으로만 응답해주세요. 모든 텍스트 내용은 한국어로 작성해주세요.
       `;
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
+        model: "gemini-3-flash-preview",
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -223,6 +236,10 @@ export default function App() {
 
       console.log("Diagnosis received.");
       const data = JSON.parse(response.text || '{}');
+      
+      // 2. 결과 캐싱
+      localStorage.setItem(cacheKey, JSON.stringify(data));
+      
       setResult(data);
       
       // Save to history
@@ -261,11 +278,12 @@ export default function App() {
           console.log("Location obtained:", latitude, longitude);
           
           const mapsResponse = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
+            model: "gemini-3-flash-preview",
             contents: `Find 3 real hospitals or clinics for ${data.hospitalVisit.department} near my current location (${latitude}, ${longitude}). 
             For each hospital, provide its name, address, and latitude/longitude.
             Format the output as a JSON list inside the text: [ { "name": "...", "address": "...", "lat": 0.0, "lng": 0.0 } ]`,
             config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
               tools: [{ googleMaps: {} }],
               toolConfig: {
                 retrievalConfig: {
@@ -288,21 +306,24 @@ export default function App() {
           (updatedResult as any).nearbyHospitals = mapsResponse.text;
           (updatedResult as any).groundingChunks = mapsResponse.candidates?.[0]?.groundingMetadata?.groundingChunks;
           setResult(updatedResult);
+          
+          // 캐시 업데이트
+          localStorage.setItem(cacheKey, JSON.stringify(updatedResult));
         } catch (e) {
           console.warn("Hospital search or geolocation failed:", e);
           // Fallback to simple search without location if geolocation fails
           try {
             const searchResponse = await ai.models.generateContent({
-              model: "gemini-3.1-pro-preview",
+              model: "gemini-3-flash-preview",
               contents: `Find 3 real hospitals or clinics for ${data.hospitalVisit.department} in South Korea. Provide their names and addresses.`,
               config: {
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
                 tools: [{ googleSearch: {} }]
               }
             });
-            setResult(prev => ({
-              ...prev!,
-              nearbyHospitals: searchResponse.text
-            } as any));
+            const updatedResult = { ...data, nearbyHospitals: searchResponse.text };
+            setResult(updatedResult);
+            localStorage.setItem(cacheKey, JSON.stringify(updatedResult));
           } catch (e2) {
             console.error("Fallback search failed", e2);
           }
@@ -340,6 +361,23 @@ export default function App() {
 
   const handleExtractSymptoms = async () => {
     if (!nlInput.trim() && mediaFiles.length === 0) return;
+    
+    // 1. 캐싱 확인
+    const cacheKey = `extract_cache_${nlInput.trim()}_${mediaFiles.length}`;
+    const cachedResult = localStorage.getItem(cacheKey);
+    
+    if (cachedResult) {
+      console.log("Using cached extraction result.");
+      const data = JSON.parse(cachedResult);
+      setSymptoms({
+        mainSymptom: data.mainSymptom || '',
+        intensity: data.intensity || 'normal',
+        onset: data.onset || '오늘',
+        accompanyingSymptoms: data.accompanyingSymptoms || []
+      });
+      return;
+    }
+
     setExtracting(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
@@ -375,9 +413,10 @@ export default function App() {
       });
 
       const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
+        model: "gemini-3-flash-preview",
         contents: { parts },
         config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -394,6 +433,9 @@ export default function App() {
       });
 
       const data = JSON.parse(response.text || '{}');
+      
+      // 2. 결과 캐싱
+      localStorage.setItem(cacheKey, JSON.stringify(data));
       
       const isMediaOnly = !nlInput.trim() && mediaFiles.length > 0;
       
@@ -534,7 +576,7 @@ export default function App() {
               <div className="grid grid-cols-2 gap-4">
                 <MenuCard icon={<Stethoscope className="text-blue-500" />} title="질환 추정" desc="증상을 통해 예상 질환 확인" onClick={nextStep} />
                 <MenuCard icon={<Pill className="text-emerald-500" />} title="약 추천" desc="증상에 맞는 상비약 안내" onClick={() => setCurrentStep(10)} />
-                <MenuCard icon={<MapPin className="text-purple-500" />} title="주변 병원" desc="가까운 전문 병원 찾기" onClick={() => window.open('https://map.naver.com/v5/search/' + encodeURIComponent('주변 병원'), '_blank')} />
+                <MenuCard icon={<MapPin className="text-purple-500" />} title="주변 병원" desc="가까운 전문 병원 찾기" onClick={() => setShowMap(true)} />
                 <MenuCard 
                   icon={<ClipboardList className="text-orange-500" />} 
                   title="건강 가이드" 
@@ -597,6 +639,7 @@ export default function App() {
                       onClick={() => {
                         setResult(item.result);
                         setSymptoms(item.symptoms);
+                        setActiveTab('home');
                         setCurrentStep(4);
                       }}
                       className="w-full bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex flex-col items-start text-left space-y-3 hover:border-blue-200 transition-all group"
@@ -1232,12 +1275,6 @@ export default function App() {
                       <p className="text-[10px] text-slate-500">일반 진단 및 진료용</p>
                     </div>
                   </div>
-                  <button 
-                    onClick={() => window.open(`https://map.naver.com/v5/search/${encodeURIComponent(result.hospitalVisit.department)}`, '_blank')}
-                    className="text-xs font-bold text-blue-600 flex items-center gap-1"
-                  >
-                    병원 찾기 <ChevronRight className="w-3 h-3" />
-                  </button>
                 </div>
               </div>
 
@@ -1246,38 +1283,15 @@ export default function App() {
                 <div className="space-y-4">
                   <div className="flex items-center gap-2 text-blue-600">
                     <MapPin className="w-5 h-5" />
-                    <h3 className="font-bold">주변 병원</h3>
+                    <h3 className="font-bold">주변 병원 지도</h3>
                   </div>
                   
-                  {/* Hospital List - Simple Names */}
-                  {(result as any).nearbyHospitalsData ? (
-                    <div className="grid grid-cols-1 gap-3">
-                      {(result as any).nearbyHospitalsData.map((h: any, idx: number) => (
-                        <button 
-                          key={idx}
-                          onClick={() => handleDirections(h)}
-                          className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex items-center justify-between hover:border-blue-300 hover:bg-blue-50/30 transition-all group"
-                        >
-                          <div className="flex items-center gap-4">
-                            <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center text-blue-600 group-hover:bg-blue-600 group-hover:text-white transition-colors">
-                              <Navigation className="w-5 h-5" />
-                            </div>
-                            <div className="text-left">
-                              <h4 className="font-bold text-slate-800">{h.name}</h4>
-                              <p className="text-[10px] text-slate-400 line-clamp-1">{h.address}</p>
-                            </div>
-                          </div>
-                          <ChevronRight className="w-5 h-5 text-slate-300 group-hover:text-blue-500 transition-colors" />
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100">
-                      <div className="prose prose-slate prose-xs max-w-none text-slate-600">
-                        <ReactMarkdown>{(result as any).nearbyHospitals}</ReactMarkdown>
-                      </div>
-                    </div>
-                  )}
+                  <div className="w-full h-64 rounded-3xl overflow-hidden border border-slate-100 shadow-sm">
+                    <NaverMap 
+                      onClose={() => {}} 
+                      userLocation={userLocation} 
+                    />
+                  </div>
                 </div>
               )}
 
@@ -1500,6 +1514,7 @@ export default function App() {
           </button>
         </nav>
       )}
+      {showMap && <NaverMap onClose={() => setShowMap(false)} userLocation={userLocation} />}
     </div>
   );
 }
